@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Web Framework Demo</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 Web Framework Demo</h1>
+            <p class="subtitle">Java HTTP Server with Lambda Routing</p>
+        </header>
+        
+        <main>
+            <section class="card">
+                <h2>📡 Dynamic Endpoints</h2>
+                
+                <div class="endpoint-test">
+                    <h3>GET /hello</h3>
+                    <p>Returns a greeting with optional name parameter</p>
+                    <div class="input-group">
+                        <input type="text" id="helloName" placeholder="Enter name (optional)" value="Nestor">
+                        <button onclick="testHello()">Test /hello</button>
+                    </div>
+                    <div class="input-group">
+                        <input type="text" id="helloLang" placeholder="Language (optional)" value="es">
+                        <button onclick="testHelloWithLang()">Test /hello with language</button>
+                    </div>
+                    <pre id="helloResult" class="result"></pre>
+                </div>
+                
+                <div class="endpoint-test">
+                    <h3>GET /pi</h3>
+                    <p>Returns the value of π</p>
+                    <button onclick="testPi()">Test /pi</button>
+                    <pre id="piResult" class="result"></pre>
+                </div>
+            </section>
+            
+            <section class="card">
+                <h2>📁 Static Files</h2>
+                <p>These are served from <code>src/main/resources/webroot/</code></p>
+                <ul>
+                    <li><a href="/styles.css" target="_blank">/styles.css</a></li>
+                    <li><a href="/app.js" target="_blank">/app.js</a></li>
+                    <li><a href="/images/logo.png" target="_blank">/images/logo.png</a></li>
+                </ul>
+            </section>
+            
+            <section class="card">
+                <h2>🖼️ Image Test</h2>
+                <img src="/images/logo.png" alt="Logo" class="demo-image">
+            </section>
+            
+            <section class="card">
+                <h2>⚠️ Error Tests</h2>
+                <button onclick="test404()">Test 404 (/unknown)</button>
+                <pre id="errorResult" class="result"></pre>
+            </section>
+        </main>
+        
+        <footer>
+            <p>Environment: <span id="env">loading...</span></p>
+            <p>Port: <span id="port">loading...</span></p>
+        </footer>
+    </div>
+    
+    <script src="/app.js"></script>
+    <script>
+        // Load environment info
+        fetch('/hello')
+            .then(r => r.text())
+            .then(t => {
+                document.getElementById('env').textContent = 'development';
+                document.getElementById('port').textContent = window.location.port || '8080';
+            });
+    </script>
+</body>
+</html>

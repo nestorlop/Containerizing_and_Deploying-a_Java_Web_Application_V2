@@ -1,812 +1,352 @@
-# Building and Deploying a Maintainable Application Server
+# HTTP Server Framework - Extension
 
-Laboratorio de Ingeniería de Sistemas — Escuela Colombiana de Ingeniería Julio Garavito
+## Estado inicial del framework
 
-## Descripción
+Este proyecto parte del servidor HTTP básico desarrollado durante el curso. El servidor fue construido utilizando `ServerSocket` de Java, sin utilizar frameworks como Spring Boot.
 
-En este laboratorio se tomó un servidor HTTP básico desarrollado anteriormente en Java y se fue mejorando hasta convertirlo en un pequeño framework web.
+En su versión inicial, el framework contaba con las siguientes características:
 
-La idea principal fue dejar de tener las rutas directamente dentro del servidor y crear una estructura que permita registrar endpoints de una forma más sencilla, por ejemplo usando lambdas:
+* Servidor secuencial, es decir, atendía una solicitud a la vez.
+* Registro de rutas mediante lambdas, por ejemplo:
+  `framework.get("/path", (req, resp) -> ...)`
+* Servía archivos estáticos desde la carpeta `webroot`.
+* Permitía obtener parámetros de las solicitudes mediante `req.getValue("name")`.
+* Utilizaba variables de entorno como `PORT`, `APP_ENV` y `GREETING_PREFIX`.
+* Contaba con un endpoint `/shutdown`, disponible únicamente en el entorno de desarrollo.
+* El proyecto se empaquetaba como un JAR ejecutable utilizando Maven Shade Plugin.
 
-```java
-framework.get("/hello", (req, resp) -> {
-    // lógica del endpoint
-});
-```
+### Limitaciones encontradas
 
-Además, el servidor puede manejar archivos estáticos, parámetros de consulta, variables de entorno y un apagado controlado.
+Aunque el servidor cumplía con su objetivo inicial, tenía algunas limitaciones:
 
-El servidor funciona de manera **secuencial**, es decir, no utiliza múltiples hilos ni concurrencia, ya que esto hace parte de los requisitos del laboratorio.
+* Solo podía procesar una solicitud a la vez.
+* No tenía un mecanismo específico para manejar correctamente la terminación del proceso, por ejemplo, cuando Docker enviaba una señal de apagado.
+* No contaba con un `Dockerfile` para facilitar su ejecución mediante contenedores.
+* El proyecto estaba configurado para Java 17.
 
-### Tecnologías utilizadas
-
-* Java 17
-* Maven
-* JDK estándar
-* Sockets TCP
-* HTML, CSS y JavaScript para la interfaz de prueba
-* AWS para el despliegue
-
-No se utilizó Spring Boot ni ningún otro framework web externo.
+A partir de estas limitaciones se realizaron varias mejoras al framework.
 
 ---
 
-## Inicio rápido
+## Cambios realizados en esta extensión
 
-### Requisitos
+### 1. Manejo concurrente de solicitudes
 
-Para ejecutar el proyecto se necesita:
+Una de las principales mejoras fue cambiar la forma en que el servidor procesa las solicitudes.
 
-* Java 17 o superior
-* Maven 3.8 o superior
+Anteriormente, cada conexión se atendía directamente desde el hilo principal. Esto significaba que mientras una solicitud estaba siendo procesada, las demás tenían que esperar.
 
-### Compilar el proyecto
+Para solucionar esto se agregó un `ExecutorService` con un thread pool fijo:
 
-Desde la carpeta principal:
+```java
+ExecutorService executor = Executors.newFixedThreadPool(10);
+```
+
+El tamaño del pool también puede configurarse mediante la variable de entorno `THREAD_POOL_SIZE`.
+
+Cada conexión recibida se envía al pool para que pueda ser procesada de manera independiente:
+
+```java
+executor.submit(() -> handleRequest(socket));
+```
+
+De esta forma, el servidor puede atender varias solicitudes al mismo tiempo sin que una solicitud bloquee completamente a las demás.
+
+---
+
+### 2. Graceful Shutdown
+
+También se agregó un mecanismo de apagado controlado para evitar que el servidor termine abruptamente mientras todavía está procesando solicitudes.
+
+Para esto se agregó un Shutdown Hook:
+
+```java
+Runtime.getRuntime().addShutdownHook(new Thread(this::stop));
+```
+
+Cuando la aplicación recibe una señal de terminación, se ejecuta el método `stop()`.
+
+El proceso de apagado funciona de la siguiente manera:
+
+1. Se cierra el `ServerSocket` para evitar aceptar nuevas conexiones.
+2. Se solicita al `executor` que termine las tareas que están actualmente en ejecución.
+3. El servidor espera hasta 30 segundos para que estas solicitudes terminen normalmente.
+4. Si después de ese tiempo todavía existen tareas activas, se utiliza `shutdownNow()` para intentar detenerlas.
+5. Finalmente, se espera un máximo adicional de 10 segundos.
+6. Si ocurre una interrupción durante este proceso, se maneja correctamente mediante `InterruptedException`.
+
+La idea es que el servidor pueda cerrarse de forma controlada, especialmente cuando se ejecuta dentro de Docker.
+
+---
+
+## 3. Actualización a Java 21
+
+El proyecto también fue actualizado de Java 17 a Java 21.
+
+En el `pom.xml` se modificó la versión utilizada por el compilador:
+
+```xml
+<maven.compiler.source>21</maven.compiler.source>
+<maven.compiler.target>21</maven.compiler.target>
+```
+
+Para mantener la misma versión de Java al ejecutar la aplicación dentro de Docker, se utiliza Amazon Corretto 21 como imagen base.
+
+---
+
+## 4. Dockerfile
+
+Se agregó un `Dockerfile` para poder empaquetar el servidor dentro de un contenedor.
+
+```dockerfile
+FROM amazoncorretto:21
+
+WORKDIR /app
+
+COPY target/httpserver-1.0-SNAPSHOT.jar app.jar
+
+ENV PORT=9000
+
+EXPOSE 9000
+
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+En este caso, el contenedor utiliza el puerto `9000` por defecto.
+
+---
+
+# Cómo compilar el proyecto
+
+Primero se debe generar el JAR ejecutable con Maven:
 
 ```bash
 mvn clean package
 ```
 
-Esto genera el JAR dentro de la carpeta `target/`.
-
-### Ejecutar
-
-```bash
-java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-Por defecto, el servidor queda disponible en:
-
-```text
-http://localhost:8080
-```
-
-El puerto puede cambiarse mediante la variable de entorno `PORT`.
-
----
-
-## Variables de entorno
-
-El proyecto utiliza algunas variables de entorno para poder cambiar su comportamiento sin modificar el código.
-
-| Variable          | Valor por defecto | Uso                              |
-| ----------------- | ----------------- | -------------------------------- |
-| `PORT`            | `8080`            | Puerto donde escucha el servidor |
-| `APP_ENV`         | `development`     | Define el ambiente de ejecución  |
-| `GREETING_PREFIX` | `Hello`           | Prefijo utilizado en `/hello`    |
-
-Por ejemplo:
-
-### Cambiar el puerto
-
-```bash
-PORT=9090 java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-### Ejecutar en producción
-
-```bash
-APP_ENV=production java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-En este ambiente el endpoint `/shutdown` no se registra.
-
-### Cambiar el saludo
-
-```bash
-GREETING_PREFIX=Hola java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-Con esto:
-
-```text
-/hello?name=Nestor
-```
-
-responde:
-
-```text
-Hola Nestor
-```
-
-También se pueden combinar las variables:
-
-```bash
-PORT=8080 APP_ENV=production GREETING_PREFIX=Hola java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
----
-
-# Arquitectura
-
-La estructura del proyecto se separó en varias clases para que cada una tenga una responsabilidad específica.
-
-```text
-                         HttpServer
-                             |
-                             v
-                       WebFramework
-                             |
-              +--------------+--------------+
-              |              |              |
-              v              v              v
-            Router     StaticFileService  Lifecycle
-              |
-       +------+------+
-       |             |
-       v             v
-    /hello           /pi
-    lambda          lambda
-```
-
-El flujo general es:
-
-1. `HttpServer` abre el `ServerSocket`.
-2. Espera una conexión mediante `accept()`.
-3. Recibe y analiza el request HTTP.
-4. `WebFramework` busca una ruta registrada.
-5. Si existe una ruta dinámica, ejecuta su lambda.
-6. Si no existe, intenta buscar un archivo estático.
-7. Si tampoco existe el recurso, devuelve `404 Not Found`.
-8. La respuesta se construye mediante `Response`.
-
----
-
-## Clases principales
-
-| Clase               | Función                                                                                                          |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `HttpServer`        | Abre el `ServerSocket` y maneja el ciclo principal del servidor.                                                 |
-| `WebFramework`      | Es la parte principal del framework y permite registrar rutas, archivos estáticos e iniciar/detener el servidor. |
-| `Router`            | Guarda y busca las rutas registradas.                                                                            |
-| `StaticFileService` | Busca y sirve archivos dentro de `webroot`. También controla el acceso a rutas fuera de esa carpeta.             |
-| `Request`           | Procesa la petición HTTP y permite obtener parámetros, headers, método y ruta.                                   |
-| `Response`          | Construye la respuesta HTTP, incluyendo status, headers, tipo de contenido y body.                               |
-| `WebService`        | Interfaz funcional utilizada para poder registrar handlers mediante lambdas.                                     |
-| `Application`       | Punto de entrada de la aplicación. Aquí se configuran las rutas y se inicia el servidor.                         |
-
----
-
-# API del framework
-
-La idea del framework es poder registrar rutas sin tener que modificar directamente el funcionamiento interno del servidor.
-
-Por ejemplo:
-
-```java
-WebFramework framework = new WebFramework();
-
-framework.staticfiles("/webroot");
-
-framework.get("/hello", (req, resp) -> {
-    String name = req.getValue("name");
-
-    if (name == null) {
-        name = "world";
-    }
-
-    String prefix = System.getenv()
-            .getOrDefault("GREETING_PREFIX", "Hello");
-
-    resp.setContentType("text/plain; charset=utf-8");
-    resp.setBody(prefix + " " + name);
-    resp.send();
-});
-
-framework.get("/pi", (req, resp) -> {
-    resp.setContentType("text/plain; charset=utf-8");
-    resp.setBody(String.valueOf(Math.PI));
-    resp.send();
-});
-
-framework.start();
-```
-
-También existe el método:
-
-```java
-framework.stop();
-```
-
-para detener el servidor de forma controlada.
-
----
-
-# Endpoints
-
-## Endpoints dinámicos
-
-### `GET /hello`
-
-Devuelve un saludo.
-
-Sin parámetro:
-
-```text
-GET /hello
-```
-
-Respuesta:
-
-```text
-Hello world
-```
-
-Con un nombre:
-
-```text
-GET /hello?name=Nestor
-```
-
-Respuesta:
-
-```text
-Hello Nestor
-```
-
-El valor de `GREETING_PREFIX` también se tiene en cuenta.
-
----
-
-### `GET /pi`
-
-Devuelve el valor de π:
-
-```text
-GET /pi
-```
-
-Respuesta:
-
-```text
-3.141592653589793
-```
-
----
-
-### `GET /shutdown`
-
-Permite detener el servidor de manera controlada.
-
-Este endpoint solamente está disponible cuando:
-
-```text
-APP_ENV != production
-```
-
-Por defecto el ambiente es `development`.
-
-En producción, la ruta no se registra y por eso responde:
-
-```text
-404 Not Found
-```
-
----
-
-# Query Parameters
-
-La clase `Request` permite obtener parámetros enviados en la URL mediante:
-
-```java
-req.getValue("name")
-```
-
-Por ejemplo:
-
-```text
-/hello?name=Nestor
-```
-
-devuelve:
-
-```text
-Nestor
-```
-
-También se soportan varios parámetros:
-
-```text
-/hello?name=Nestor&language=es
-```
-
-Y si un mismo parámetro aparece varias veces, `getValue()` devuelve el primer valor:
-
-```text
-/hello?name=A&name=B
-```
-
-Resultado:
-
-```text
-A
-```
-
-Los parámetros también se decodifican automáticamente.
-
-Por ejemplo:
-
-```text
-Juan%20Perez
-```
-
-se convierte en:
-
-```text
-Juan Perez
-```
-
----
-
-# Archivos estáticos
-
-Cuando una ruta no corresponde a un endpoint dinámico, el framework intenta buscar el recurso dentro de:
-
-```text
-src/main/resources/webroot/
-```
-
-Por ejemplo:
-
-```text
-/
-```
-
-carga:
-
-```text
-webroot/index.html
-```
-
-Otros ejemplos:
-
-```text
-/styles.css
-/app.js
-/images/logo.png
-```
-
-El servidor también identifica diferentes tipos MIME, entre ellos:
-
-* `.html`
-* `.css`
-* `.js`
-* `.png`
-* `.jpg`
-* `.jpeg`
-* `.gif`
-* `.txt`
-* `.ico`
-* `.svg`
-* `.json`
-* `.woff`
-* `.woff2`
-* `.ttf`
-* `.eot`
-
----
-
-# Orden de resolución de las rutas
-
-Cuando llega una petición, el framework sigue este orden:
-
-```text
-1. Ruta dinámica
-        ↓
-2. Archivo estático
-        ↓
-3. 404 Not Found
-```
-
-Esto permite que una ruta registrada mediante `framework.get()` tenga prioridad sobre un posible archivo estático con el mismo nombre.
-
----
-
-# Pruebas realizadas
-
-## 1. Archivos estáticos
-
-```bash
-curl -v http://localhost:8080/
-
-curl -v http://localhost:8080/index.html
-
-curl -v http://localhost:8080/styles.css
-
-curl -v http://localhost:8080/app.js
-
-curl -v http://localhost:8080/images/logo.png
-```
-
-Se verifica que los recursos respondan con:
-
-```text
-200 OK
-```
-
-y que tengan su `Content-Type` y `Content-Length` correspondientes.
-
----
-
-## 2. Endpoints dinámicos
-
-```bash
-curl -v http://localhost:8080/hello
-
-curl -v "http://localhost:8080/hello?name=Nestor"
-
-curl -v "http://localhost:8080/hello?name=Nestor&language=es"
-
-curl -v http://localhost:8080/pi
-```
-
----
-
-## 3. Rutas inexistentes
-
-```bash
-curl -v http://localhost:8080/unknown
-
-curl -v http://localhost:8080/archivo-inexistente.txt
-```
-
-En estos casos se espera:
-
-```text
-404 Not Found
-```
-
----
-
-## 4. Path Traversal
-
-También se probaron diferentes formas de intentar acceder a archivos fuera de `webroot`.
-
-```bash
-curl -v "http://localhost:8080/../pom.xml"
-
-curl -v "http://localhost:8080/..%2Fpom.xml"
-
-curl -v "http://localhost:8080/%2e%2e%2fpom.xml"
-
-curl -v "http://localhost:8080/%2e%2e%5cpom.xml"
-```
-
-Estos intentos no deben permitir acceder al `pom.xml` ni a ningún otro archivo fuera de `webroot`.
-
-El servidor responde con:
-
-```text
-404 Not Found
-```
-
----
-
-## 5. Request malformado
-
-Se probó también qué sucede cuando llega una petición que no tiene el formato HTTP esperado:
-
-```bash
-echo -e "GARBAGE REQUEST\r\n\r\n" | nc localhost 8080
-```
-
-El resultado esperado es:
-
-```text
-400 Bad Request
-```
-
-Lo importante en esta prueba es que el error de una petición no termine el proceso completo del servidor.
-
-Después de la prueba se puede verificar que continúa funcionando:
-
-```bash
-curl -v http://localhost:8080/pi
-```
-
----
-
-## 6. Variables de entorno
-
-### `GREETING_PREFIX`
-
-```bash
-GREETING_PREFIX=Hola java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-Luego:
-
-```bash
-curl "http://localhost:8080/hello?name=Nestor"
-```
-
-Respuesta:
-
-```text
-Hola Nestor
-```
-
-### `PORT`
-
-```bash
-PORT=9090 java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-Y se prueba:
-
-```bash
-curl http://localhost:9090/pi
-```
-
----
-
-## 7. Shutdown
-
-En desarrollo:
-
-```bash
-curl -v http://localhost:8080/shutdown
-```
-
-Respuesta:
-
-```text
-200 OK
-Server shutting down...
-```
-
-Después de enviar la respuesta, el servidor cierra el `ServerSocket` y termina su ciclo principal.
-
-En producción:
-
-```bash
-APP_ENV=production java -jar target/httpserver-1.0-SNAPSHOT.jar
-```
-
-Al intentar:
-
-```bash
-curl -v http://localhost:8080/shutdown
-```
-
-se obtiene:
-
-```text
-404 Not Found
-```
-
----
-
-# Frontend de prueba
-
-El proyecto incluye una pequeña interfaz dentro de `webroot/`.
-
-Se puede abrir desde:
-
-```text
-http://localhost:8080/
-```
-
-La página permite probar algunas de las funcionalidades del servidor desde el navegador.
-
-Por ejemplo:
-
-* Probar `/hello`
-* Probar `/pi`
-* Enviar parámetros mediante `fetch()`
-* Verificar que se cargue el CSS
-* Verificar el JavaScript
-* Cargar imágenes
-* Mostrar las respuestas del servidor
-
-Esto también sirve para comprobar que los archivos estáticos y los endpoints dinámicos funcionan juntos.
-
----
-
-# Deployment en AWS
-
-El servidor está preparado para ejecutarse en servicios de AWS como EC2, Elastic Beanstalk o ECS.
-
-Primero se genera el JAR:
-
-```bash
-mvn clean package
-```
-
-El archivo generado es:
+Al finalizar, se genera el archivo:
 
 ```text
 target/httpserver-1.0-SNAPSHOT.jar
 ```
 
-### Arquitectura en AWS (EC2)
+---
 
-![Despliegue en EC2](Image/EC2%20.png)
+# Ejecución local
 
-En el servidor cloud se deben configurar las variables de entorno correspondientes.
+El servidor puede ejecutarse directamente con Java.
 
-Por ejemplo:
+### Puerto por defecto
 
-```text
-PORT=5000
-APP_ENV=production
-GREETING_PREFIX=Hola
+```bash
+java -jar target/httpserver-1.0-SNAPSHOT.jar
 ```
 
-El puerto debe utilizar el valor que proporcione el entorno de ejecución.
+### Utilizando otro puerto
 
-### Health check
-
-Se puede utilizar:
-
-```text
-GET /
+```bash
+PORT=9000 java -jar target/httpserver-1.0-SNAPSHOT.jar
 ```
 
-o:
+### Cambiando el tamaño del thread pool
 
-```text
-GET /pi
+```bash
+THREAD_POOL_SIZE=20 java -jar target/httpserver-1.0-SNAPSHOT.jar
 ```
 
-para comprobar que la aplicación está respondiendo correctamente.
+El framework cuenta con los siguientes endpoints principales:
 
-Después del despliegue se pueden verificar:
-
-```text
-GET /
-GET /hello?name=Cloud
-GET /pi
-GET /shutdown
-```
-
-En producción, `/shutdown` debe devolver `404 Not Found`.
+* `GET /hello?name=X` → devuelve un saludo, por ejemplo `Hello X`.
+* `GET /pi` → devuelve el valor de π.
+* `GET /shutdown` → permite apagar el servidor cuando está ejecutándose en el entorno de desarrollo.
 
 ---
 
-# Estructura del proyecto
+# Ejecución con Docker
 
-```text
-httpserver/
-├── pom.xml
-├── README.md
-└── src/
-    ├── main/
-    │   ├── java/
-    │   │   └── co/
-    │   │       └── edu/
-    │   │           └── escuelaing/
-    │   │               ├── Application.java
-    │   │               ├── HttpServer.java
-    │   │               ├── WebFramework.java
-    │   │               ├── Router.java
-    │   │               ├── StaticFileService.java
-    │   │               ├── Request.java
-    │   │               ├── Response.java
-    │   │               ├── WebService.java
-    │   │               ├── EchoServer.java
-    │   │               ├── EchoClient.java
-    │   │               └── Main.java
-    │   │
-    │   └── resources/
-    │       └── webroot/
-    │           ├── index.html
-    │           ├── styles.css
-    │           ├── app.js
-    │           └── images/
-    │               └── logo.png
-    │
-    └── test/
+## Construir la imagen
+
+Después de generar el JAR, se puede construir la imagen:
+
+```bash
+docker build -t <dockerhub-user>/httpserver-framework:1.0 .
 ```
 
-Las clases `EchoServer`, `EchoClient` y `Main` corresponden a código utilizado en etapas anteriores del laboratorio y se mantienen como parte del proyecto.
+## Ejecutar el contenedor
+
+```bash
+docker run -d \
+  --name httpserver-test \
+  -e PORT=9000 \
+  -p 9000:9000 \
+  <dockerhub-user>/httpserver-framework:1.0
+```
+
+En este caso, el puerto `9000` del equipo se conecta con el puerto `9000` del contenedor.
+
+## Probar el servidor
+
+Se pueden realizar algunas solicitudes para comprobar que la aplicación está funcionando:
+
+```bash
+curl http://localhost:9000/hello?name=Test
+
+curl http://localhost:9000/pi
+
+curl http://localhost:9000/shutdown
+```
+
+## Revisar los logs
+
+Para revisar lo que está ocurriendo dentro del contenedor:
+
+```bash
+docker logs httpserver-test
+```
 
 ---
 
-# Requisitos del laboratorio
+# Deployment en Amazon EC2
 
-| #  | Requisito                  | Implementación                             |
-| -- | -------------------------- | ------------------------------------------ |
-| 1  | `staticfiles("/webroot")`  | `WebFramework` + `StaticFileService`       |
-| 2  | `get("/ruta", lambda)`     | `Router` + `WebService`                    |
-| 3  | `Request.getValue()`       | Lectura de query parameters                |
-| 4  | Múltiples parámetros       | Parser mediante `&`                        |
-| 5  | Prioridad de rutas         | Dinámicas → estáticos → 404                |
-| 6  | HTTP 404                   | Implementado en `Response`                 |
-| 7  | Requests inválidos         | Manejo de errores con `400`                |
-| 8  | `PORT`                     | Variable de entorno con `8080` por defecto |
-| 9  | `GREETING_PREFIX`          | Personalización del endpoint `/hello`      |
-| 10 | `/shutdown` en development | Registro condicional                       |
-| 11 | Shutdown graceful          | Cierre del `ServerSocket`                  |
-| 12 | HTML                       | `index.html`                               |
-| 13 | CSS                        | `styles.css`                               |
-| 14 | JavaScript                 | `app.js`                                   |
-| 15 | Imagen                     | `logo.png`                                 |
-| 16 | Dos endpoints lambda       | `/hello` y `/pi`                           |
-| 17 | `fetch()`                  | Utilizado desde `app.js`                   |
-| 18 | Cloud deployment           | JAR ejecutable + configuración por entorno |
-| 19 | `PORT` en cloud            | Lectura mediante variable de entorno       |
-| 20 | `APP_ENV=production`       | Configurable                               |
-| 21 | Shutdown deshabilitado     | `/shutdown` no se registra en producción   |
-| 22 | README                     | Documentación del proyecto                 |
+Una vez comprobado el funcionamiento del contenedor localmente, la imagen puede publicarse en Docker Hub y posteriormente utilizarse desde una instancia EC2.
+
+## 1. Publicar la imagen en Docker Hub
+
+Primero se pueden crear los tags:
+
+```bash
+docker tag <user>/httpserver-framework:1.0 <user>/httpserver-framework:latest
+```
+
+Luego se publican:
+
+```bash
+docker push <user>/httpserver-framework:1.0
+
+docker push <user>/httpserver-framework:latest
+```
+
+Esto permite disponer de las versiones `1.0` y `latest` en Docker Hub.
 
 ---
 
-# Seguridad
+## 2. Ejecutar la aplicación en EC2
 
-Aunque se trata de un servidor pequeño para el laboratorio, se agregaron algunas validaciones básicas.
+La aplicación se desplegó en una instancia Amazon Linux 2023.
 
-### Path Traversal
+Primero se instala Docker:
 
-Los archivos solamente se pueden obtener desde:
-
-```text
-classpath:/webroot/
+```bash
+sudo yum update -y
+sudo yum install -y docker
 ```
 
-Se validan las rutas para evitar intentos de acceder a archivos externos mediante segmentos como:
+Después se inicia el servicio:
 
-```text
-..
-.
-%2e
-%2e%2e
-%2f
-%5c
+```bash
+sudo service docker start
 ```
 
-### Manejo de errores
+Para poder utilizar Docker con el usuario `ec2-user`:
 
-El servidor utiliza diferentes códigos HTTP según el problema:
-
-```text
-200 OK
-400 Bad Request
-404 Not Found
-500 Internal Server Error
+```bash
+sudo usermod -a -G docker ec2-user
 ```
 
-Los errores no exponen el stack trace directamente al cliente.
+Después de esto se debe cerrar la sesión SSH y volver a conectarse.
 
-### Servidor secuencial
+Finalmente, se descarga la imagen:
 
-El servidor mantiene el comportamiento solicitado en el laboratorio: procesa las conexiones de forma secuencial y no implementa concurrencia mediante múltiples threads.
+```bash
+docker pull <user>/httpserver-framework:1.0
+```
+
+Y se ejecuta el contenedor:
+
+```bash
+docker run -d \
+  --name httpserver-framework \
+  --restart unless-stopped \
+  -e PORT=9000 \
+  -p 8081:9000 \
+  <user>/httpserver-framework:1.0
+```
+
+Aquí el puerto `8081` de la instancia EC2 se conecta con el puerto `9000` del contenedor.
 
 ---
 
-# Tecnologías
+## 3. Configuración del Security Group
 
-* **Java 17**
-* **Maven**
-* **Java Sockets**
-* **HTML**
-* **CSS**
-* **JavaScript**
-* **AWS**
+Para poder acceder al servidor desde Internet fue necesario permitir tráfico TCP en el puerto `8081` dentro del Security Group de la instancia EC2.
 
-Se utilizan principalmente clases del JDK como:
+---
 
-```text
-java.net
-java.io
-java.nio
-java.util
+## 4. Verificar el deployment
+
+Primero se puede comprobar que el contenedor esté ejecutándose:
+
+```bash
+docker ps
 ```
 
-El objetivo fue construir la funcionalidad principal sin depender de frameworks web externos.
+También se pueden revisar sus logs:
+
+```bash
+docker logs httpserver-framework
+```
+
+Finalmente, el servidor puede probarse utilizando el DNS público de la instancia:
+
+```bash
+curl http://<EC2-PUBLIC-DNS>:8081/hello?name=Cloud
+
+curl http://<EC2-PUBLIC-DNS>:8081/pi
+```
+
+Si las solicitudes devuelven correctamente las respuestas esperadas, significa que el servidor está funcionando dentro del contenedor y puede ser accedido desde la instancia EC2.
+
+---
+
+# Evidencias
+
+Durante el desarrollo se generaron diferentes evidencias para comprobar cada parte de la implementación:
+
+| Archivo                | Descripción                                                             |
+| ---------------------- | ----------------------------------------------------------------------- |
+| `docker-build.png`     | Construcción de la imagen y resultado de `docker images`.               |
+| `docker-run.png`       | Contenedor ejecutándose y resultado de `docker ps`.                     |
+| `concurrency-test.png` | Prueba con 20 solicitudes realizadas en paralelo.                       |
+| `shutdown-test.png`    | Prueba del apagado controlado y logs generados durante el proceso.      |
+| `ec2-deploy.png`       | Contenedor ejecutándose en EC2 y prueba mediante una solicitud pública. |
+| `dockerhub-tags.png`   | Imágenes publicadas en Docker Hub con los tags `1.0` y `latest`.        |
+
+---
+
+# Commit significativo
+
+El commit principal de esta extensión corresponde a la implementación de la concurrencia y el apagado controlado.
+
+**Mensaje del commit:**
+
+```text
+Implement concurrent request handling and graceful shutdown
+```
+
+Los principales cambios incluidos fueron:
+
+* `pom.xml`: actualización de Java 17 a Java 21.
+* `WebFramework.java`: incorporación del thread pool y graceful shutdown.
+* `Dockerfile`: configuración para ejecutar el servidor dentro de Docker.
+
+El hash del commit puede obtenerse con:
+
+```bash
+git log -1 --oneline
+```
 
 ---
 
 # Autor
 
-**Nestor David Lopez Castañeda**
-
-Estudiante de Ingeniería de Sistemas
-Escuela Colombiana de Ingeniería Julio Garavito
-
----
-
-# Licencia
-
-MIT License.
+**Nestor David Lopez Castaneda**
